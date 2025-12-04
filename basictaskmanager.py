@@ -31,7 +31,11 @@ class TaskManagerApp:
         self.root.title("Python Task Manager Ultimate")
         self.root.geometry("1400x800")
         self.dark_mode = False
-        
+
+        # Style setup
+        self.style = ttk.Style()
+        self.setup_styles()
+
         # Data storage
         self.process_data = []
         self.net_connections = []
@@ -41,7 +45,7 @@ class TaskManagerApp:
         self.net_sent_history = np.zeros(60)
         self.net_recv_history = np.zeros(60)
         self.history_index = 0
-        
+
         self.sort_column = "cpu"
         self.sort_reverse = True
         self.alert_cpu_threshold = 90
@@ -61,6 +65,10 @@ class TaskManagerApp:
         self.refresh_thread.start()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def setup_styles(self):
+        """Initialize base styles"""
+        self.style.theme_use('clam')
 
     def init_process_tab(self):
         self.process_frame = ttk.Frame(self.notebook)
@@ -94,7 +102,7 @@ class TaskManagerApp:
 
         for col in columns:
             self.tree.heading(col, text=col.upper(), command=lambda c=col: self.change_sort(c))
-            self.tree.column(col, width=90 if col not in ['name','status'] else 200, 
+            self.tree.column(col, width=90 if col not in ['name','status'] else 200,
                            anchor=tk.CENTER if col in ['pid','cpu','mem_mb','mem_pct','threads','affinity'] else tk.W)
 
         vsb = ttk.Scrollbar(self.process_frame, orient="vertical", command=self.tree.yview)
@@ -153,7 +161,7 @@ class TaskManagerApp:
         columns = ("pid","laddr","raddr","status","type")
         self.net_tree = ttk.Treeview(self.net_frame, columns=columns, show="headings")
         self.net_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
+
         for col in columns:
             self.net_tree.heading(col, text=col.upper())
             self.net_tree.column(col, width=200)
@@ -203,16 +211,21 @@ class TaskManagerApp:
                     mem_mb = p.memory_info().rss / (1024 ** 2)
                     mem_pct = p.memory_percent()
                     start_time = datetime.datetime.fromtimestamp(p.create_time()).strftime("%H:%M")
-                    parent = psutil.Process(p.parent().pid if p.parent() else 0).name()[:20] if p.parent() else "init"
+                    parent = p.parent().pid if p.parent() else 0
+                    try:
+                        parent_name = psutil.Process(parent).name()[:20] if parent else "init"
+                    except:
+                        parent_name = "N/A"
                     threads = p.num_threads()
-                    affinity = len(p.cpu_affinity())
-                    
-                    self.process_data.append((p.pid, p.name()[:30], p.status(), cpu_p, mem_mb, mem_pct, start_time, parent, threads, affinity))
-                    
+                    affinity = len(p.cpu_affinity()) if hasattr(p, 'cpu_affinity') else 'N/A'
+
+                    self.process_data.append((p.pid, p.name()[:30], p.status(), cpu_p, mem_mb,
+                                              mem_pct, start_time, parent_name, threads, affinity))
+
                     if cpu_p > self.alert_cpu_threshold and p.pid not in self.last_alert:
                         notify("High CPU Process", f"{p.name()} using {cpu_p:.1f}% CPU")
                         self.last_alert[p.pid] = time.time()
-                        
+
             except:
                 continue
 
@@ -228,30 +241,25 @@ class TaskManagerApp:
 
         count = 0
         for data in self.process_data:
-            if filter_text and filter_text not in str(data).lower():
+            filter_check = filter_text in str(data).lower()
+            if filter_text and not filter_check:
                 continue
             self.tree.insert("", tk.END, values=data)
             count += 1
 
-        self.status_label.config(text=f"Processes: {count}")
+        self.status_label.config(text=f"Processes: {count} | Dark Mode: {'ON' if self.dark_mode else 'OFF'}")
 
     def refresh_network(self):
         for item in self.net_tree.get_children():
             self.net_tree.delete(item)
-            
+
         connections = psutil.net_connections(kind='inet')
-        for conn in connections[:100]:  # Limit to 100 for performance
+        for conn in connections[:100]:
             try:
-                pid = conn.pid
-                if pid:
-                    proc = psutil.Process(pid)
-                    self.net_tree.insert("", tk.END, values=(
-                        pid, 
-                        f"{conn.laddr.ip}:{conn.laddr.port}", 
-                        f"{conn.raddr.ip}:{conn.raddr.port}", 
-                        conn.status, 
-                        conn.type
-                    ))
+                pid = conn.pid or 0
+                laddr = f"{conn.laddr.ip}:{conn.laddr.port}" if conn.laddr else ""
+                raddr = f"{conn.raddr.ip}:{conn.raddr.port}" if conn.raddr else ""
+                self.net_tree.insert("", tk.END, values=(pid, laddr, raddr, conn.status, conn.type))
             except:
                 continue
 
@@ -261,7 +269,6 @@ class TaskManagerApp:
         disk = psutil.disk_usage('/')
         net = psutil.net_io_counters()
 
-        # Update circular buffers
         self.cpu_history[self.history_index] = cpu
         self.mem_history[self.history_index] = mem.percent
         self.disk_history[self.history_index] = disk.percent
@@ -269,7 +276,6 @@ class TaskManagerApp:
         self.net_recv_history[self.history_index] = net.bytes_recv / (1024 ** 2)
         self.history_index = (self.history_index + 1) % 60
 
-        # Update graphs
         x = np.arange(60)
         self.line_cpu.set_data(x, self.cpu_history)
         self.line_mem.set_data(x, self.mem_history)
@@ -277,17 +283,16 @@ class TaskManagerApp:
         self.line_net_sent.set_data(x, self.net_sent_history)
         self.line_net_recv.set_data(x, self.net_recv_history)
 
-        self.ax4.set_ylim(np.min([self.net_sent_history.min(), self.net_recv_history.min()]) * 0.9,
-                         np.max([self.net_sent_history.max(), self.net_recv_history.max()]) * 1.1)
+        self.ax4.set_ylim(min(self.net_sent_history.min(), self.net_recv_history.min()) * 0.9,
+                         max(self.net_sent_history.max(), self.net_recv_history.max()) * 1.1)
 
         self.fig.canvas.draw_idle()
         self.canvas.flush_events()
 
-    # Process actions
     def kill_selected_process(self):
         selected = self.tree.selection()
-        if not selected: return messagebox.showinfo("Error", "Select a process first.")
-        
+        if not selected:
+            return messagebox.showinfo("Error", "Select a process first.")
         pid = int(self.tree.item(selected[0])["values"][0])
         if messagebox.askyesno("Confirm", f"Kill PID {pid}?"):
             try:
@@ -300,64 +305,64 @@ class TaskManagerApp:
 
     def lower_priority(self):
         selected = self.tree.selection()
-        if not selected: return messagebox.showinfo("Error", "Select a process first.")
-        
+        if not selected:
+            return messagebox.showinfo("Error", "Select a process first.")
         pid = int(self.tree.item(selected[0])["values"][0])
         try:
             p = psutil.Process(pid)
             current = p.nice()
             p.nice(min(current + 5, 19))
-            self.status_label.config(text=f"Priority lowered: PID {pid}")
+            self.status_label.config(text=f"Priority lowered for PID {pid}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
     def show_details(self):
         selected = self.tree.selection()
-        if not selected: return messagebox.showinfo("Error", "Select a process first.")
-        
+        if not selected:
+            return messagebox.showinfo("Error", "Select a process first.")
         pid = int(self.tree.item(selected[0])["values"][0])
         try:
             p = psutil.Process(pid)
             io = p.io_counters()
-            messagebox.showinfo("Details", f"PID: {pid}\nName: {p.name()}\n"
-                                       f"IO Read: {io.read_bytes:,}\nIO Write: {io.write_bytes:,}\n"
-                                       f"Threads: {p.num_threads()}")
+            messagebox.showinfo("Details",
+                                f"PID: {pid}\nName: {p.name()}\n"
+                                f"IO Read: {io.read_bytes:,} bytes\nIO Write: {io.write_bytes:,} bytes\n"
+                                f"Threads: {p.num_threads()}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
     def show_process_tree(self):
         tree_win = tk.Toplevel(self.root)
         tree_win.title("Process Tree")
-        tree = ttk.Treeview(tree_win, columns=("pid","cpu"), show="tree headings")
-        tree.heading("#0", text="Name")
-        tree.heading("pid", text="PID")
-        tree.heading("cpu", text="CPU%")
+        tree = ttk.Treeview(tree_win)
         tree.pack(fill=tk.BOTH, expand=True)
 
-    # File operations
-    def export_csv(self):
-        filename = filedialog.asksaveasfilename(defaultextension=".csv")
-        if filename:
-            with open(filename, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(self.tree["columns"])
-                for item in self.tree.get_children():
-                    writer.writerow(self.tree.item(item)["values"])
-            messagebox.showinfo("Success", f"Exported to {filename}")
+        tree["columns"] = ("pid", "cpu")
+        tree.heading("#0", text="Name")
+        tree.heading("pid", text="PID")
+        tree.heading("cpu", text="CPU %")
 
-    def import_csv(self):
-        filename = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
-        if filename:
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-            with open(filename, 'r') as f:
-                reader = csv.reader(f)
-                next(reader)  # Skip header
-                for row in reader:
-                    self.tree.insert("", tk.END, values=row)
-            messagebox.showinfo("Success", f"Imported from {filename}")
+        # Build process tree dictionary
+        procs = {p.pid: p for p in psutil.process_iter()}
+        children_map = {}
+        for pid, proc in procs.items():
+            ppid = proc.ppid()
+            children_map.setdefault(ppid, []).append(pid)
 
-    # Logging
+        def insert_tree(parent, ppid):
+            for child_pid in children_map.get(ppid, []):
+                proc = procs.get(child_pid)
+                if not proc:
+                    continue
+                try:
+                    cpu = proc.cpu_percent(interval=None)
+                except:
+                    cpu = 0
+                node = tree.insert(parent, tk.END, text=proc.name(), values=(child_pid, f"{cpu:.1f}"))
+                insert_tree(node, child_pid)
+
+        insert_tree("", 0)
+
     def start_logging(self):
         self.scheduled_log_file = filedialog.asksaveasfilename(defaultextension=".csv")
         if self.scheduled_log_file:
@@ -369,21 +374,65 @@ class TaskManagerApp:
         messagebox.showinfo("Logging", "Stopped logging")
 
     def log_processes(self):
-        if self.scheduled_log_file and self.process_data:
-            with open(self.scheduled_log_file, 'a', newline='') as f:
+        if not self.scheduled_log_file:
+            return
+        with open(self.scheduled_log_file, "a", newline="") as f:
+            writer = csv.writer(f)
+            if os.path.getsize(self.scheduled_log_file) == 0:
+                writer.writerow(["timestamp"] + list(self.tree["columns"]))
+            for item in self.tree.get_children():
+                writer.writerow([datetime.datetime.now().isoformat()] + self.tree.item(item)["values"])
+
+    def export_csv(self):
+        fn = filedialog.asksaveasfilename(defaultextension=".csv")
+        if fn:
+            with open(fn, "w", newline="") as f:
                 writer = csv.writer(f)
-                if os.path.getsize(self.scheduled_log_file) == 0:
-                    writer.writerow(["timestamp"] + list(self.tree["columns"]))
-                writer.writerow([datetime.datetime.now().isoformat()] + list(self.process_data[0]))
+                writer.writerow(self.tree["columns"])
+                for item in self.tree.get_children():
+                    writer.writerow(self.tree.item(item)["values"])
+            messagebox.showinfo("Export CSV", f"Exported view to {fn}")
+
+    def import_csv(self):
+        fn = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
+        if fn:
+            with open(fn, "r") as f:
+                reader = csv.reader(f)
+                headers = next(reader)
+                for item in self.tree.get_children():
+                    self.tree.delete(item)
+                for row in reader:
+                    self.tree.insert("", tk.END, values=row)
+            messagebox.showinfo("Import CSV", f"Imported processes from {fn}")
 
     def toggle_dark_mode(self):
         self.dark_mode = not self.dark_mode
         style = ttk.Style()
+
         if self.dark_mode:
             style.theme_use('clam')
-            style.configure('TNotebook', background='black')
+            style.configure('TFrame', background='#2b2b2b')
+            style.configure('TNotebook', background='#2b2b2b')
+            style.configure('TNotebook.Tab', background='#3c3c3c', foreground='white')
+            style.configure('TLabel', background='#2b2b2b', foreground='white', font=('Arial', 10))
+            style.map('TLabel', background=[('active', '#3c3c3c')])
+            style.configure('TButton', background='#404040', foreground='white', borderwidth=1)
+            style.map('TButton', background=[('active', '#505050'), ('pressed', '#303030')],
+                      foreground=[('active', 'white')])
+            style.configure('TEntry', fieldbackground='#404040', foreground='white', borderwidth=1)
+            style.map('TEntry', fieldbackground=[('focus', '#505050')])
+            style.configure('Treeview', background='#2b2b2b', foreground='white', fieldbackground='#2b2b2b')
+            style.configure('Treeview.Heading', background='#404040', foreground='white')
+            style.map('Treeview', background=[('selected', '#505050')])
+            style.map('Treeview.Heading', background=[('active', '#505050')])
+            style.configure('Vertical.TScrollbar', background='#404040', troughcolor='#2b2b2b', borderwidth=0)
+            style.map('Vertical.TScrollbar', background=[('active', '#505050')])
         else:
             style.theme_use('default')
+            style.configure('TLabel', font=('Arial', 10))
+
+        self.root.update_idletasks()
+        self.status_label.config(text=f"Processes: {len(self.tree.get_children())} | Dark Mode: {'ON' if self.dark_mode else 'OFF'}")
 
     def change_sort(self, column):
         if self.sort_column == column:
@@ -398,10 +447,12 @@ class TaskManagerApp:
         plt.close('all')
         self.root.destroy()
 
+
 def main():
     root = tk.Tk()
     app = TaskManagerApp(root)
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()
